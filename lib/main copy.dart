@@ -106,7 +106,7 @@ return Scaffold(
   color: Colors.greenAccent,
   size: 55,
 ),
-const SizedBox(height: 12),
+SizedBox(height: 12),
         Text(
           'Noise level is safe',
           style: TextStyle(color: Colors.greenAccent, fontSize: 18),
@@ -117,7 +117,7 @@ const SizedBox(height: 12),
             color: Colors.greenAccent,
             size: 55,
         ),
-const SizedBox(height: 12),
+SizedBox(height: 12),
         Text(
           'Alert threshold: 85 dB',
           style: TextStyle(color: Colors.white70, fontSize: 16),

@@ -1,9 +1,12 @@
 // Needs one package:  flutter pub add flutter_animate
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' show ImageFilter, FontFeature;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
+
+import 'api_service.dart';
 
 void main() => runApp(const SoundApp());
 
@@ -19,15 +22,14 @@ const muted = Color(0xFFA6A0C0);
 
 const tabular = TextStyle(fontFeatures: [FontFeature.tabularFigures()]);
 
-// demo values (no sensor connected yet)
-const demoDb = 68.4;
-const demoThreshold = 85.0;
 
 /// Staggered entrance used on every card.
 Widget reveal(Widget w, int i) => w
     .animate(delay: Duration(milliseconds: 80 * i))
     .fadeIn(duration: 550.ms, curve: Curves.easeOut)
     .slideY(begin: 0.12, end: 0, duration: 550.ms, curve: Curves.easeOutCubic);
+
+String fmt(dynamic v) => v == null ? '--' : (v as num).toStringAsFixed(1);
 
 // ───────────────────────── APP ─────────────────────────
 
@@ -65,6 +67,17 @@ class _MonitorScreenState extends State<MonitorScreen>
   final List<double> caps = List<double>.filled(48, 0); // spectrum peak-hold
   int tab = 0;
 
+  // ── backend connection ──
+  final api = ApiService();
+  Timer? poller;
+  Dashboard? dash; // latest /dashboard response
+  bool online = false;
+
+  // ── history data (loaded when the History tab is open) ──
+  List<Map<String, dynamic>> readings = [];
+  List<Map<String, dynamic>> alerts = [];
+  Map<String, dynamic>? stats;
+
   @override
   void initState() {
     super.initState();
@@ -76,10 +89,46 @@ class _MonitorScreenState extends State<MonitorScreen>
       vsync: this,
       duration: const Duration(seconds: 20),
     )..repeat();
+
+    refresh();
+    poller = Timer.periodic(const Duration(seconds: 2), (_) => refresh());
+  }
+
+  /// Ask the Flask backend for the latest reading.
+  Future<void> refresh() async {
+    try {
+      final d = await api.dashboard();
+      if (mounted) {
+        setState(() {
+          dash = d;
+          online = true;
+        });
+        if (tab == 1) loadHistory();
+      }
+    } catch (_) {
+      if (mounted && online) setState(() => online = false);
+    }
+  }
+
+  /// Load saved readings, statistics and alerts for the History tab.
+  Future<void> loadHistory() async {
+    try {
+      final r = await api.readings();
+      final st = await api.statistics();
+      final a = await api.alerts();
+      if (mounted) {
+        setState(() {
+          readings = r;
+          stats = st;
+          alerts = a;
+        });
+      }
+    } catch (_) {}
   }
 
   @override
   void dispose() {
+    poller?.cancel();
     fast.dispose();
     slow.dispose();
     super.dispose();
@@ -137,6 +186,7 @@ class _MonitorScreenState extends State<MonitorScreen>
                 onTap: (i) {
                   HapticFeedback.selectionClick();
                   setState(() => tab = i);
+                  if (i == 1) loadHistory();
                 },
               ),
             ),
@@ -219,6 +269,35 @@ class _MonitorScreenState extends State<MonitorScreen>
   // ───────────────────────── MONITOR TAB ─────────────────────────
 
   Widget buildMonitor() {
+    final db = dash?.latestNoiseLevel;
+    final hasData = db != null;
+    final threshold = dash?.threshold ?? 70.0;
+    final status = !online ? 'OFFLINE' : (dash?.status ?? 'NO_DATA');
+    final Color sc = switch (status) {
+      'NORMAL' => green,
+      'HIGH' => danger,
+      'OFFLINE' => danger,
+      _ => const Color(0xFFFFB84D),
+    };
+    final chipLabel = switch (status) {
+      'NORMAL' => 'MONITORING',
+      'HIGH' => 'ALERT',
+      'OFFLINE' => 'OFFLINE',
+      _ => 'WAITING FOR DATA',
+    };
+    final headline = switch (status) {
+      'NORMAL' => 'Below configured threshold',
+      'HIGH' => 'Above threshold',
+      'OFFLINE' => 'Backend not reachable',
+      _ => 'Waiting for first reading',
+    };
+    final statusIcon = switch (status) {
+      'NORMAL' => Icons.shield_outlined,
+      'HIGH' => Icons.warning_amber_rounded,
+      'OFFLINE' => Icons.cloud_off,
+      _ => Icons.hourglass_empty,
+    };
+
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 120),
       children: [
@@ -227,43 +306,49 @@ class _MonitorScreenState extends State<MonitorScreen>
             title: 'Environmental noise',
             icon: Icons.radar,
             glow: violet,
-            trailing: const StatusChip(label: 'MONITORING', color: green, dot: true),
+            trailing: StatusChip(label: chipLabel, color: sc, dot: true),
             child: Column(
               children: [
-                HeroGauge(fast: fast, slow: slow),
+                HeroGauge(
+                  fast: fast,
+                  slow: slow,
+                  db: db ?? 0,
+                  threshold: threshold,
+                  hasData: hasData,
+                ),
                 const SizedBox(height: 6),
                 Container(
                   padding: const EdgeInsets.all(13),
                   decoration: BoxDecoration(
-                    color: green.withValues(alpha: 0.07),
+                    color: sc.withValues(alpha: 0.07),
                     borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: green.withValues(alpha: 0.25)),
+                    border: Border.all(color: sc.withValues(alpha: 0.25)),
                   ),
-                  child: const Row(
+                  child: Row(
                     children: [
-                      Icon(Icons.shield_outlined, color: green, size: 22),
-                      SizedBox(width: 11),
+                      Icon(statusIcon, color: sc, size: 22),
+                      const SizedBox(width: 11),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              'Below configured threshold',
+                              headline,
                               style: TextStyle(
-                                color: green,
+                                color: sc,
                                 fontWeight: FontWeight.bold,
                                 fontSize: 12,
                               ),
                             ),
-                            SizedBox(height: 3),
+                            const SizedBox(height: 3),
                             Text(
-                              'Illustrative limit: 85 dB',
-                              style: TextStyle(color: muted, fontSize: 10),
+                              'Limit: ${threshold.round()} dB',
+                              style: const TextStyle(color: muted, fontSize: 10),
                             ),
                           ],
                         ),
                       ),
-                      Icon(Icons.arrow_forward_ios, color: green, size: 12),
+                      Icon(Icons.arrow_forward_ios, color: sc, size: 12),
                     ],
                   ),
                 ),
@@ -358,7 +443,7 @@ class _MonitorScreenState extends State<MonitorScreen>
         ),
         const SizedBox(height: 14),
         reveal(
-          const Panel(
+          Panel(
             title: 'System connections',
             subtitle: 'Status',
             icon: Icons.hub_outlined,
@@ -366,16 +451,20 @@ class _MonitorScreenState extends State<MonitorScreen>
               children: [
                 ConnectionRow(
                   icon: Icons.memory,
-                  title: 'ESP32 microphone',
-                  detail: 'Hardware not connected',
-                  color: pink,
+                  title: 'Sensor data',
+                  detail: hasData
+                      ? 'Last reading: ${dash?.recordedAt ?? '-'}'
+                      : 'No readings received yet',
+                  color: hasData ? green : pink,
                 ),
-                Divider(color: Color(0x22FFFFFF), height: 26),
+                const Divider(color: Color(0x22FFFFFF), height: 26),
                 ConnectionRow(
                   icon: Icons.cloud_outlined,
-                  title: 'Cloud backend',
-                  detail: 'Not configured',
-                  color: violet,
+                  title: 'Backend server',
+                  detail: online
+                      ? 'Connected to $backendUrl'
+                      : 'Not reachable at $backendUrl',
+                  color: online ? green : danger,
                 ),
               ],
             ),
@@ -383,10 +472,14 @@ class _MonitorScreenState extends State<MonitorScreen>
           4,
         ),
         const SizedBox(height: 18),
-        const Center(
+        Center(
           child: Text(
-            'DEMO DATA • NO LIVE SENSOR CONNECTED',
-            style: TextStyle(fontSize: 9, letterSpacing: 1.4, color: muted),
+            !online
+                ? 'BACKEND OFFLINE • START app.py'
+                : hasData
+                    ? 'LIVE • DATA FROM BACKEND'
+                    : 'BACKEND CONNECTED • WAITING FOR READINGS',
+            style: const TextStyle(fontSize: 9, letterSpacing: 1.4, color: muted),
           ),
         ),
       ],
@@ -396,6 +489,21 @@ class _MonitorScreenState extends State<MonitorScreen>
   // ───────────────────────── HISTORY TAB (blank) ─────────────────────────
 
   Widget buildHistory() {
+    final hasReadings = readings.isNotEmpty;
+    final threshold = dash?.threshold ?? 70.0;
+    final chartData = readings
+        .take(60)
+        .map((r) => (r['noise_level'] as num).toDouble())
+        .toList()
+        .reversed
+        .toList();
+    final total = stats?['total_readings'] ?? readings.length;
+    final subtitle = !online
+        ? 'Backend not reachable. Start app.py to see saved readings.'
+        : hasReadings
+            ? '$total readings saved in the database.'
+            : 'No readings saved yet. Send one to the backend to see it here.';
+
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 8, 20, 120),
       children: [
@@ -408,56 +516,163 @@ class _MonitorScreenState extends State<MonitorScreen>
         ),
         const SizedBox(height: 8),
         reveal(
-          const Text(
-            'Your recorded measurements will appear here once data storage is connected.',
-            style: TextStyle(color: muted, height: 1.5),
-          ),
+          Text(subtitle, style: const TextStyle(color: muted, height: 1.5)),
           1,
         ),
-        const SizedBox(height: 24),
-        reveal(
-          Glass(
-            glow: violet,
-            padding: const EdgeInsets.symmetric(vertical: 30, horizontal: 20),
-            child: Column(
-              children: [
-                SizedBox(
-                  width: 150,
-                  height: 150,
-                  child: Stack(
-                    alignment: Alignment.center,
-                    children: [
-                      CustomPaint(
-                        size: const Size(150, 150),
-                        painter: PulseRingsPainter(fast),
-                      ),
-                      const Icon(Icons.query_stats, size: 48, color: violet)
-                          .animate(onPlay: (c) => c.repeat(reverse: true))
-                          .moveY(
-                            begin: -5,
-                            end: 5,
-                            duration: 1600.ms,
-                            curve: Curves.easeInOut,
-                          ),
-                    ],
+        const SizedBox(height: 20),
+        if (!hasReadings)
+          reveal(
+            Glass(
+              glow: violet,
+              padding: const EdgeInsets.symmetric(vertical: 30, horizontal: 20),
+              child: Column(
+                children: [
+                  SizedBox(
+                    width: 150,
+                    height: 150,
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        CustomPaint(
+                          size: const Size(150, 150),
+                          painter: PulseRingsPainter(fast),
+                        ),
+                        const Icon(Icons.query_stats, size: 48, color: violet)
+                            .animate(onPlay: (c) => c.repeat(reverse: true))
+                            .moveY(
+                              begin: -5,
+                              end: 5,
+                              duration: 1600.ms,
+                              curve: Curves.easeInOut,
+                            ),
+                      ],
+                    ),
                   ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'No recordings yet',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    online
+                        ? 'Send a reading to the backend and it will appear here.'
+                        : 'Start the backend server to load saved readings.',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: muted, fontSize: 12, height: 1.5),
+                  ),
+                ],
+              ),
+            ),
+            2,
+          )
+        else ...[
+          reveal(
+            Row(
+              children: [
+                Expanded(
+                  child: StatTile(label: 'MIN', value: fmt(stats?['minimum_noise']), color: green),
                 ),
-                const SizedBox(height: 12),
-                const Text(
-                  'No recordings yet',
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: StatTile(label: 'AVG', value: fmt(stats?['average_noise']), color: cyan),
                 ),
-                const SizedBox(height: 8),
-                const Text(
-                  'History and long-term noise trends are not configured.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: muted, fontSize: 12, height: 1.5),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: StatTile(label: 'MAX', value: fmt(stats?['maximum_noise']), color: pink),
                 ),
               ],
             ),
+            2,
           ),
-          2,
-        ),
+          const SizedBox(height: 14),
+          reveal(
+            Panel(
+              title: 'Noise level',
+              subtitle: 'Last ${chartData.length} readings (dB)',
+              icon: Icons.show_chart,
+              trailing: StatusChip(label: 'LIMIT ${threshold.round()} dB', color: danger),
+              child: Column(
+                children: [
+                  SizedBox(
+                    height: 190,
+                    width: double.infinity,
+                    child: CustomPaint(
+                      painter: LinePainter(chartData, threshold, fast),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  const Padding(
+                    padding: EdgeInsets.only(left: 30),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [AxisLabel('Older'), AxisLabel('Latest')],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            3,
+          ),
+          const SizedBox(height: 14),
+          reveal(
+            Panel(
+              title: 'Alerts',
+              subtitle: alerts.isEmpty ? 'No alerts yet' : '${alerts.length} recorded',
+              icon: Icons.warning_amber_rounded,
+              child: alerts.isEmpty
+                  ? const Row(
+                      children: [
+                        Icon(Icons.verified_outlined, color: green, size: 22),
+                        SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            'Noise has not stayed above the limit long enough to raise an alert.',
+                            style: TextStyle(color: muted, fontSize: 12, height: 1.4),
+                          ),
+                        ),
+                      ],
+                    )
+                  : Column(
+                      children: [
+                        for (int i = 0; i < math.min(alerts.length, 8); i++) ...[
+                          if (i > 0) const Divider(color: Color(0x22FFFFFF), height: 22),
+                          ConnectionRow(
+                            icon: Icons.warning_amber_rounded,
+                            title: '${fmt(alerts[i]['noise_level'])} dB',
+                            detail:
+                                '${alerts[i]['recorded_at']} • limit ${fmt(alerts[i]['threshold'])} dB',
+                            color: danger,
+                          ),
+                        ],
+                      ],
+                    ),
+            ),
+            4,
+          ),
+          const SizedBox(height: 14),
+          reveal(
+            Panel(
+              title: 'Recent readings',
+              subtitle: 'Newest first',
+              icon: Icons.history,
+              child: Column(
+                children: [
+                  for (int i = 0; i < math.min(readings.length, 8); i++) ...[
+                    if (i > 0) const Divider(color: Color(0x22FFFFFF), height: 22),
+                    ConnectionRow(
+                      icon: Icons.graphic_eq,
+                      title: '${fmt(readings[i]['noise_level'])} dB',
+                      detail: '${readings[i]['recorded_at']}',
+                      color: ((readings[i]['noise_level'] as num) > threshold) ? danger : cyan,
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            5,
+          ),
+        ],
       ],
     );
   }
@@ -482,13 +697,15 @@ class _MonitorScreenState extends State<MonitorScreen>
         ),
         const SizedBox(height: 24),
         reveal(
-          const Glass(
+          Glass(
             child: Column(
               children: [
                 ConnectionRow(
                   icon: Icons.notifications_active_outlined,
                   title: 'Noise alert threshold',
-                  detail: '85 dB • Demo setting',
+                  detail: dash == null
+                      ? 'Waiting for backend'
+                      : '${dash!.threshold.round()} dB • from backend',
                   color: cyan,
                 ),
                 Divider(color: Color(0x22FFFFFF), height: 28),
@@ -502,7 +719,7 @@ class _MonitorScreenState extends State<MonitorScreen>
                 ConnectionRow(
                   icon: Icons.storage_outlined,
                   title: 'Data storage',
-                  detail: 'Backend not configured',
+                  detail: online ? 'Backend database connected' : 'Backend not reachable',
                   color: pink,
                 ),
               ],
@@ -520,8 +737,18 @@ class _MonitorScreenState extends State<MonitorScreen>
 class HeroGauge extends StatelessWidget {
   final Animation<double> fast;
   final Animation<double> slow;
+  final double db;
+  final double threshold;
+  final bool hasData;
 
-  const HeroGauge({super.key, required this.fast, required this.slow});
+  const HeroGauge({
+    super.key,
+    required this.fast,
+    required this.slow,
+    required this.db,
+    required this.threshold,
+    required this.hasData,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -536,8 +763,8 @@ class HeroGauge extends StatelessWidget {
             painter: RadialBarsPainter(fast, slow),
           ),
           TweenAnimationBuilder<double>(
-            tween: Tween(begin: 0, end: demoDb),
-            duration: const Duration(milliseconds: 1900),
+            tween: Tween(begin: 0, end: db),
+            duration: const Duration(milliseconds: 1200),
             curve: Curves.easeOutCubic,
             builder: (context, v, _) {
               return Stack(
@@ -545,7 +772,7 @@ class HeroGauge extends StatelessWidget {
                 children: [
                   CustomPaint(
                     size: const Size(280, 280),
-                    painter: GaugePainter(v, fast),
+                    painter: GaugePainter(v, threshold, fast),
                   ),
                   Column(
                     mainAxisSize: MainAxisSize.min,
@@ -561,7 +788,7 @@ class HeroGauge extends StatelessWidget {
                           end: Alignment.bottomCenter,
                         ).createShader(r),
                         child: Text(
-                          v.toStringAsFixed(1),
+                          hasData ? v.toStringAsFixed(1) : '--',
                           style: tabular.copyWith(
                             fontSize: 52,
                             height: 1.05,
@@ -581,9 +808,9 @@ class HeroGauge extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(height: 6),
-                      const Text(
-                        'DEMO READING',
-                        style: TextStyle(color: muted, fontSize: 9, letterSpacing: 1),
+                      Text(
+                        hasData ? 'LATEST READING' : 'NO DATA YET',
+                        style: const TextStyle(color: muted, fontSize: 9, letterSpacing: 1),
                       ),
                     ],
                   ),
@@ -601,9 +828,10 @@ class HeroGauge extends StatelessWidget {
 
 class GaugePainter extends CustomPainter {
   final double value;
+  final double threshold;
   final Animation<double> anim;
 
-  GaugePainter(this.value, this.anim) : super(repaint: anim);
+  GaugePainter(this.value, this.threshold, this.anim) : super(repaint: anim);
 
   static const maxDb = 120.0;
   static const start = 0.75 * math.pi;
@@ -691,7 +919,7 @@ class GaugePainter extends CustomPainter {
     }
 
     // illustrative limit marker (85 dB)
-    final ta = start + sweep * (demoThreshold / maxDb);
+    final ta = start + sweep * (threshold / maxDb).clamp(0.0, 1.0);
     canvas.drawLine(
       center + Offset(math.cos(ta), math.sin(ta)) * (radius - 10),
       center + Offset(math.cos(ta), math.sin(ta)) * (radius + 10),
@@ -703,7 +931,8 @@ class GaugePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant GaugePainter old) => old.value != value;
+  bool shouldRepaint(covariant GaugePainter old) =>
+      old.value != value || old.threshold != threshold;
 }
 
 /// Audio-visualizer ring around the gauge.
@@ -1367,4 +1596,169 @@ class GlassNav extends StatelessWidget {
       ),
     );
   }
+}
+
+
+// ───────────────────────── HISTORY WIDGETS ─────────────────────────
+
+class StatTile extends StatelessWidget {
+  final String label;
+  final String value;
+  final Color color;
+
+  const StatTile({super.key, required this.label, required this.value, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Glass(
+      radius: 18,
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              color: color,
+              fontSize: 9,
+              letterSpacing: 1.2,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
+              Text(
+                value,
+                style: tabular.copyWith(fontSize: 22, fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(width: 4),
+              const Text('dB', style: TextStyle(fontSize: 10, color: muted)),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class LinePainter extends CustomPainter {
+  final List<double> data;
+  final double threshold;
+  final Animation<double> anim;
+
+  LinePainter(this.data, this.threshold, this.anim) : super(repaint: anim);
+
+  static const minY = 20.0;
+  static const maxY = 120.0;
+  static const leftPad = 30.0;
+
+  void label(Canvas canvas, String text, Offset at,
+      {Color color = muted, bool right = false, bool centerY = false}) {
+    final tp = TextPainter(
+      text: TextSpan(text: text, style: TextStyle(color: color, fontSize: 9.5)),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    tp.paint(
+      canvas,
+      Offset(right ? at.dx - tp.width : at.dx, centerY ? at.dy - tp.height / 2 : at.dy),
+    );
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final plotW = size.width - leftPad;
+    final plotH = size.height - 8;
+
+    double yFor(double v) =>
+        4 + plotH * (1 - ((v - minY) / (maxY - minY)).clamp(0.0, 1.0));
+    double xFor(int i) =>
+        data.length == 1 ? size.width - 4 : leftPad + plotW * i / (data.length - 1);
+
+    final grid = Paint()
+      ..color = Colors.white.withValues(alpha: 0.07)
+      ..strokeWidth = 0.8;
+    for (int v = 20; v <= 120; v += 20) {
+      final y = yFor(v.toDouble());
+      canvas.drawLine(Offset(leftPad, y), Offset(size.width, y), grid);
+      label(canvas, '$v', Offset(leftPad - 6, y), right: true, centerY: true);
+    }
+
+    if (data.isEmpty) return;
+
+    final shader = const LinearGradient(colors: [cyan, violet, pink])
+        .createShader(Rect.fromLTWH(leftPad, 0, plotW, size.height));
+
+    if (data.length > 1) {
+      final line = Path();
+      for (int i = 0; i < data.length; i++) {
+        final x = xFor(i);
+        final y = yFor(data[i]);
+        if (i == 0) {
+          line.moveTo(x, y);
+        } else {
+          line.lineTo(x, y);
+        }
+      }
+
+      final fill = Path.from(line)
+        ..lineTo(size.width, 4 + plotH)
+        ..lineTo(leftPad, 4 + plotH)
+        ..close();
+      canvas.drawPath(
+        fill,
+        Paint()
+          ..shader = LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [cyan.withValues(alpha: 0.22), cyan.withValues(alpha: 0)],
+          ).createShader(Rect.fromLTWH(leftPad, 0, plotW, size.height)),
+      );
+
+      canvas.drawPath(
+        line,
+        Paint()
+          ..shader = shader
+          ..color = Colors.white.withValues(alpha: 0.5)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 8
+          ..strokeJoin = StrokeJoin.round
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6),
+      );
+      canvas.drawPath(
+        line,
+        Paint()
+          ..shader = shader
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2.4
+          ..strokeJoin = StrokeJoin.round
+          ..strokeCap = StrokeCap.round,
+      );
+    }
+
+    // dashed limit line
+    final ty = yFor(threshold);
+    final dash = Paint()
+      ..color = danger.withValues(alpha: 0.9)
+      ..strokeWidth = 1.2;
+    for (double x = leftPad; x < size.width; x += 9) {
+      canvas.drawLine(Offset(x, ty), Offset(math.min(x + 5, size.width), ty), dash);
+    }
+    label(canvas, 'Limit ${threshold.round()} dB', Offset(size.width, ty - 13),
+        color: danger, right: true);
+
+    // latest reading with pulsing halo
+    final last = Offset(xFor(data.length - 1), yFor(data.last));
+    canvas.drawCircle(
+      last,
+      6 + 8 * anim.value,
+      Paint()..color = Colors.white.withValues(alpha: (1 - anim.value) * 0.35),
+    );
+    canvas.drawCircle(last, 4.5, Paint()..color = Colors.white);
+  }
+
+  @override
+  bool shouldRepaint(covariant LinePainter old) => true;
 }

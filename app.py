@@ -36,7 +36,7 @@ def send_telegram_alert(noise_level):
     message = (
         "🚨 EchoSense Noise Alert!\n\n"
         f"Noise level: {noise_level} dB\n"
-        f"Threshold: {NOISE_THRESHOLD} dB\n"
+        f"Threshold: 95.0 dB\n"
         "Noise has remained above the threshold."
     )
 
@@ -449,7 +449,7 @@ def acknowledge_alert():
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
 
-    
+
 @app.route("/test-telegram")
 def test_telegram():
     send_telegram_alert(100)

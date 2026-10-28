@@ -4,16 +4,12 @@ from flask_cors import CORS
 from database import create_database
 import sqlite3
 import time
+import os
+import requests
 
 app = Flask(__name__)
 CORS(app)
-NOISE_THRESHOLD = 95.0
-SUSTAIN_SECONDS = 15
-REMINDER_SECONDS = 45
 
-above_since = None
-last_alert_time = 0
-alert_acknowledged = False
 
 # Create the database if it doesn't exist
 create_database()
@@ -28,6 +24,32 @@ def home():
 
 
 # Save a noise reading
+
+def send_telegram_alert(noise_level):
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+    if not token or not chat_id:
+        print("Telegram credentials missing")
+        return
+
+    message = (
+        "🚨 EchoSense Noise Alert!\n\n"
+        f"Noise level: {noise_level} dB\n"
+        f"Threshold: {NOISE_THRESHOLD} dB\n"
+        "Noise has remained above the threshold."
+    )
+
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data={"chat_id": chat_id, "text": message},
+            timeout=10
+        )
+        response.raise_for_status()
+        print("Telegram alert sent!")
+    except requests.RequestException as e:
+        print(f"Telegram alert failed: {e}")
 
 def check_for_alert(noise_level):
     global above_since, last_alert_time, alert_acknowledged
@@ -64,6 +86,7 @@ def check_for_alert(noise_level):
     connection.close()
 
     last_alert_time = now
+    send_telegram_alert(noise_level)
     return True
 
 

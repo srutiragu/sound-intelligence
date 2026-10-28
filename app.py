@@ -10,6 +10,9 @@ import requests
 app = Flask(__name__)
 CORS(app)
 
+NOISE_THRESHOLD = 95.0
+SUSTAIN_SECONDS = 15
+REMINDER_SECONDS = 45
 
 # Create the database if it doesn't exist
 create_database()

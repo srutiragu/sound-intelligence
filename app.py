@@ -448,3 +448,9 @@ def acknowledge_alert():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
+
+    
+@app.route("/test-telegram")
+def test_telegram():
+    send_telegram_alert(100)
+    return "Telegram test attempted"

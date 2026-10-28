@@ -7,6 +7,10 @@ import time
 import os
 import requests
 
+above_since = None
+last_alert_time = 0
+alert_acknowledged = False
+
 app = Flask(__name__)
 CORS(app)
 

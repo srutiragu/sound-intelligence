@@ -214,8 +214,10 @@ class _HomeScreenState extends State<HomeScreen> {
       });
       if (!seeded) seedRecent();
       if (tab == 1) loadHistory();
-    } catch (_) {
-      if (mounted && online) setState(() => online = false);
+    } catch (e, st) {
+      debugPrint('DASHBOARD ERROR: $e');
+      debugPrintStack(stackTrace: st);
+      if (mounted) setState(() => online = false);
     }
   }
 

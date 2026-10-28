@@ -5,7 +5,7 @@ import 'package:http/http.dart' as http;
 ///   Android emulator : http://10.0.2.2:5000
 ///   iOS simulator    : http://localhost:5000
 ///   Real phone       : http://<your PC's Wi-Fi IP>:5000   (same Wi-Fi!)
-const backendUrl = 'http://localhost:5000';
+const backendUrl = 'http://192.168.1.8:5000';
 
 /// Response of GET /dashboard
 class Dashboard {

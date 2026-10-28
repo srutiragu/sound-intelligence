@@ -7,11 +7,13 @@ import time
 
 app = Flask(__name__)
 CORS(app)
-NOISE_THRESHOLD = 70.0
-SUSTAIN_SECONDS = 10     # level must stay above the limit this long (use 60 for real use)
-COOLDOWN_SECONDS = 30    # quiet time after an alert (use 300 for real use)
-above_since = None       # remembers when the loud period started
-last_alert_time = 0      # remembers when the last alert was created
+NOISE_THRESHOLD = 95.0
+SUSTAIN_SECONDS = 15
+REMINDER_SECONDS = 45
+
+above_since = None
+last_alert_time = 0
+alert_acknowledged = False
 
 # Create the database if it doesn't exist
 create_database()
@@ -26,30 +28,32 @@ def home():
 
 
 # Save a noise reading
+
 def check_for_alert(noise_level):
-    """Create an alert only if the noise stays high AND we are not in cooldown."""
-    global above_since, last_alert_time
+    global above_since, last_alert_time, alert_acknowledged
 
     now = time.time()
 
-    # 1. Level is fine: reset and stop
     if noise_level <= NOISE_THRESHOLD:
         above_since = None
+        last_alert_time = 0
+        alert_acknowledged = False
         return False
 
-    # 2. Level is high: remember when it started
     if above_since is None:
         above_since = now
+        last_alert_time = 0
+        alert_acknowledged = False
 
-    # 3. Not loud for long enough yet
     if now - above_since < SUSTAIN_SECONDS:
         return False
 
-    # 4. Still in cooldown from the last alert
-    if now - last_alert_time < COOLDOWN_SECONDS:
+    if alert_acknowledged:
         return False
 
-    # 5. Create the alert
+    if last_alert_time != 0 and now - last_alert_time < REMINDER_SECONDS:
+        return False
+
     connection = sqlite3.connect("noise.db")
     cursor = connection.cursor()
     cursor.execute(
@@ -61,6 +65,7 @@ def check_for_alert(noise_level):
 
     last_alert_time = now
     return True
+
 
 
 @app.route("/noise", methods=["POST"])
@@ -401,6 +406,22 @@ def daily_noise_summary():
         "maximum_noise": result[2],
         "minimum_noise": result[3]
     })
+
+@app.route("/alerts/acknowledge", methods=["POST"])
+def acknowledge_alert():
+    global alert_acknowledged
+
+    if above_since is None:
+        return jsonify({
+            "message": "No active noise incident."
+        }), 400
+
+    alert_acknowledged = True
+
+    return jsonify({
+        "message": "Alert acknowledged. Repeat alerts stopped."
+    })
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

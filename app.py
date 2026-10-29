@@ -1,8 +1,7 @@
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from database import create_database
-import sqlite3
+from database import create_database, get_connection
 import time
 import os
 import requests
@@ -18,7 +17,7 @@ NOISE_THRESHOLD = 95.0
 SUSTAIN_SECONDS = 15
 REMINDER_SECONDS = 45
 
-# Create the database if it doesn't exist
+# Create database tables in Neon PostgreSQL
 create_database()
 
 
@@ -29,8 +28,6 @@ def home():
         "status": "success"
     })
 
-
-# Save a noise reading
 
 def send_telegram_alert(noise_level):
     token = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -43,7 +40,7 @@ def send_telegram_alert(noise_level):
     message = (
         "🚨 EchoSense Noise Alert!\n\n"
         f"Noise level: {noise_level} dB\n"
-        f"Threshold: 95.0 dB\n"
+        f"Threshold: {NOISE_THRESHOLD} dB\n"
         "Noise has remained above the threshold."
     )
 
@@ -57,6 +54,7 @@ def send_telegram_alert(noise_level):
         print("Telegram alert sent!")
     except requests.RequestException as e:
         print(f"Telegram alert failed: {e}")
+
 
 def check_for_alert(noise_level):
     global above_since, last_alert_time, alert_acknowledged
@@ -83,21 +81,32 @@ def check_for_alert(noise_level):
     if last_alert_time != 0 and now - last_alert_time < REMINDER_SECONDS:
         return False
 
-    connection = sqlite3.connect("noise.db")
-    cursor = connection.cursor()
-    cursor.execute(
-        "INSERT INTO noise_alerts (noise_level, threshold) VALUES (?, ?)",
-        (noise_level, NOISE_THRESHOLD)
-    )
-    connection.commit()
-    connection.close()
+    connection = get_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO noise_alerts (noise_level, threshold)
+                VALUES (%s, %s)
+                RETURNING id
+                """,
+                (noise_level, NOISE_THRESHOLD)
+            )
+            alert_id = cursor.fetchone()[0]
+
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
     last_alert_time = now
     send_telegram_alert(noise_level)
     return True
 
 
-
+# Save a noise reading
 @app.route("/noise", methods=["POST"])
 def add_noise_reading():
     data = request.get_json(silent=True)
@@ -113,15 +122,25 @@ def add_noise_reading():
     if noise_level < 0:
         return jsonify({"error": "noise_level cannot be negative"}), 400
 
-    connection = sqlite3.connect("noise.db")
-    cursor = connection.cursor()
-    cursor.execute(
-        "INSERT INTO noise_readings (noise_level) VALUES (?)",
-        (noise_level,)
-    )
-    connection.commit()
-    reading_id = cursor.lastrowid
-    connection.close()
+    connection = get_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO noise_readings (noise_level)
+                VALUES (%s)
+                RETURNING id
+                """,
+                (noise_level,)
+            )
+            reading_id = cursor.fetchone()[0]
+
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
     alert_created = check_for_alert(noise_level)
 
@@ -138,20 +157,20 @@ def add_noise_reading():
 # Retrieve saved noise readings
 @app.route("/noise", methods=["GET"])
 def get_noise_readings():
-    connection = sqlite3.connect("noise.db")
-    connection.row_factory = sqlite3.Row
-    cursor = connection.cursor()
-
-    cursor.execute("""
-        SELECT id, noise_level, recorded_at
-        FROM noise_readings
-        ORDER BY id DESC
-    """)
-
-    readings = [dict(row) for row in cursor.fetchall()]
-    connection.close()
+    connection = get_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT id, noise_level, recorded_at
+                FROM noise_readings
+                ORDER BY id DESC
+            """)
+            readings = [dict(row) for row in cursor.fetchall()]
+    finally:
+        connection.close()
 
     return jsonify(readings)
+
 
 @app.route("/threshold", methods=["GET"])
 def get_threshold():
@@ -168,16 +187,12 @@ def update_threshold():
     data = request.get_json(silent=True)
 
     if not data or "threshold" not in data:
-        return jsonify({
-            "error": "Please provide a threshold"
-        }), 400
+        return jsonify({"error": "Please provide a threshold"}), 400
 
     try:
         new_threshold = float(data["threshold"])
     except (ValueError, TypeError):
-        return jsonify({
-            "error": "Threshold must be a number"
-        }), 400
+        return jsonify({"error": "Threshold must be a number"}), 400
 
     if not 0 < new_threshold < 200:
         return jsonify({
@@ -192,68 +207,64 @@ def update_threshold():
         "unit": "dB"
     })
 
+
 @app.route("/noise/status", methods=["POST"])
 def check_noise_status():
     data = request.get_json(silent=True)
 
     if not data or "noise_level" not in data:
-        return jsonify({
-            "error": "Please provide noise_level"
-        }), 400
+        return jsonify({"error": "Please provide noise_level"}), 400
 
     try:
         noise_level = float(data["noise_level"])
     except (ValueError, TypeError):
-        return jsonify({
-            "error": "noise_level must be a number"
-        }), 400
+        return jsonify({"error": "noise_level must be a number"}), 400
 
     if noise_level < 0:
-        return jsonify({
-            "error": "Noise level cannot be negative"
-        }), 400
+        return jsonify({"error": "Noise level cannot be negative"}), 400
 
     return jsonify({
         "noise_level": noise_level,
         "threshold": NOISE_THRESHOLD,
-        "status": (
-            "HIGH" if noise_level > NOISE_THRESHOLD
-            else "NORMAL"
-        )
+        "status": "HIGH" if noise_level > NOISE_THRESHOLD else "NORMAL"
     })
+
 
 @app.route("/noise", methods=["DELETE"])
 def delete_noise_readings():
-    connection = sqlite3.connect("noise.db")
-    cursor = connection.cursor()
+    connection = get_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM noise_readings")
+            deleted_count = cursor.rowcount
 
-    cursor.execute("DELETE FROM noise_readings")
-
-    deleted_count = cursor.rowcount
-
-    connection.commit()
-    connection.close()
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
     return jsonify({
         "message": "Noise history cleared successfully!",
         "deleted_count": deleted_count
     })
 
+
 @app.route("/dashboard", methods=["GET"])
 def get_dashboard():
-    connection = sqlite3.connect("noise.db")
-    connection.row_factory = sqlite3.Row
-    cursor = connection.cursor()
-
-    cursor.execute("""
-        SELECT noise_level, recorded_at
-        FROM noise_readings
-        ORDER BY id DESC
-        LIMIT 1
-    """)
-
-    latest_reading = cursor.fetchone()
-    connection.close()
+    connection = get_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT noise_level, recorded_at
+                FROM noise_readings
+                ORDER BY id DESC
+                LIMIT 1
+            """)
+            latest_reading = cursor.fetchone()
+    finally:
+        connection.close()
 
     if latest_reading is None:
         return jsonify({
@@ -268,30 +279,27 @@ def get_dashboard():
     return jsonify({
         "latest_noise_level": noise_level,
         "threshold": NOISE_THRESHOLD,
-        "status": (
-            "HIGH" if noise_level > NOISE_THRESHOLD
-            else "NORMAL"
-        ),
+        "status": "HIGH" if noise_level > NOISE_THRESHOLD else "NORMAL",
         "recorded_at": latest_reading["recorded_at"]
     })
 
 
 @app.route("/noise/statistics", methods=["GET"])
 def get_noise_statistics():
-    connection = sqlite3.connect("noise.db")
-    cursor = connection.cursor()
-
-    cursor.execute("""
-        SELECT
-            COUNT(*),
-            AVG(noise_level),
-            MAX(noise_level),
-            MIN(noise_level)
-        FROM noise_readings
-    """)
-
-    count, average, maximum, minimum = cursor.fetchone()
-    connection.close()
+    connection = get_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    COUNT(*),
+                    AVG(noise_level),
+                    MAX(noise_level),
+                    MIN(noise_level)
+                FROM noise_readings
+            """)
+            count, average, maximum, minimum = cursor.fetchone()
+    finally:
+        connection.close()
 
     return jsonify({
         "total_readings": count,
@@ -300,20 +308,20 @@ def get_noise_statistics():
         "minimum_noise": minimum
     })
 
+
 @app.route("/alerts", methods=["GET"])
 def get_noise_alerts():
-    connection = sqlite3.connect("noise.db")
-    connection.row_factory = sqlite3.Row
-    cursor = connection.cursor()
-
-    cursor.execute("""
-        SELECT id, noise_level, threshold, recorded_at
-        FROM noise_alerts
-        ORDER BY id DESC
-    """)
-
-    alerts = [dict(row) for row in cursor.fetchall()]
-    connection.close()
+    connection = get_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT id, noise_level, threshold, recorded_at
+                FROM noise_alerts
+                ORDER BY id DESC
+            """)
+            alerts = [dict(row) for row in cursor.fetchall()]
+    finally:
+        connection.close()
 
     return jsonify(alerts)
 
@@ -339,17 +347,25 @@ def create_noise_alert():
             "status": "NORMAL"
         }), 200
 
-    connection = sqlite3.connect("noise.db")
-    cursor = connection.cursor()
+    connection = get_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO noise_alerts (noise_level, threshold)
+                VALUES (%s, %s)
+                RETURNING id
+                """,
+                (noise_level, NOISE_THRESHOLD)
+            )
+            alert_id = cursor.fetchone()[0]
 
-    cursor.execute(
-        "INSERT INTO noise_alerts (noise_level, threshold) VALUES (?, ?)",
-        (noise_level, NOISE_THRESHOLD)
-    )
-
-    connection.commit()
-    alert_id = cursor.lastrowid
-    connection.close()
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
     return jsonify({
         "message": "High-noise alert recorded!",
@@ -359,21 +375,27 @@ def create_noise_alert():
         "status": "HIGH"
     }), 201
 
+
 @app.route("/alerts", methods=["DELETE"])
 def delete_noise_alerts():
-    connection = sqlite3.connect("noise.db")
-    cursor = connection.cursor()
+    connection = get_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM noise_alerts")
+            deleted_count = cursor.rowcount
 
-    cursor.execute("DELETE FROM noise_alerts")
-    deleted_count = cursor.rowcount
-
-    connection.commit()
-    connection.close()
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
     return jsonify({
         "message": "Alert history cleared successfully!",
         "deleted_count": deleted_count
     })
+
 
 @app.route("/noise/filter", methods=["GET"])
 def filter_noise_readings():
@@ -384,25 +406,25 @@ def filter_noise_readings():
             "error": "Please provide a date in YYYY-MM-DD format"
         }), 400
 
-    connection = sqlite3.connect("noise.db")
-    connection.row_factory = sqlite3.Row
-    cursor = connection.cursor()
-
-    cursor.execute("""
-        SELECT id, noise_level, recorded_at
-        FROM noise_readings
-        WHERE DATE(recorded_at) = ?
-        ORDER BY id DESC
-    """, (date,))
-
-    readings = [dict(row) for row in cursor.fetchall()]
-    connection.close()
+    connection = get_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT id, noise_level, recorded_at
+                FROM noise_readings
+                WHERE DATE(recorded_at) = %s
+                ORDER BY id DESC
+            """, (date,))
+            readings = [dict(row) for row in cursor.fetchall()]
+    finally:
+        connection.close()
 
     return jsonify({
         "date": date,
         "total_readings": len(readings),
         "readings": readings
     })
+
 
 @app.route("/noise/daily-summary", methods=["GET"])
 def daily_noise_summary():
@@ -413,21 +435,21 @@ def daily_noise_summary():
             "error": "Please provide a date in YYYY-MM-DD format"
         }), 400
 
-    connection = sqlite3.connect("noise.db")
-    cursor = connection.cursor()
-
-    cursor.execute("""
-        SELECT
-            COUNT(*),
-            ROUND(AVG(noise_level), 2),
-            MAX(noise_level),
-            MIN(noise_level)
-        FROM noise_readings
-        WHERE DATE(recorded_at) = ?
-    """, (date,))
-
-    result = cursor.fetchone()
-    connection.close()
+    connection = get_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    COUNT(*),
+                    ROUND(AVG(noise_level)::numeric, 2),
+                    MAX(noise_level),
+                    MIN(noise_level)
+                FROM noise_readings
+                WHERE DATE(recorded_at) = %s
+            """, (date,))
+            result = cursor.fetchone()
+    finally:
+        connection.close()
 
     return jsonify({
         "date": date,
@@ -436,6 +458,7 @@ def daily_noise_summary():
         "maximum_noise": result[2],
         "minimum_noise": result[3]
     })
+
 
 @app.route("/alerts/acknowledge", methods=["POST"])
 def acknowledge_alert():
@@ -453,11 +476,11 @@ def acknowledge_alert():
     })
 
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
-
-
 @app.route("/test-telegram")
 def test_telegram():
     send_telegram_alert(100)
     return "Telegram test attempted"
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
